@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from itertools import chain, zip_longest
 from typing import Any
 
 import voluptuous as vol
@@ -113,6 +115,60 @@ async def async_search_media(
     if media_type != MEDIA_ALL:
         results = [item for item in results if item["media_type"] == media_type]
     return results[:limit]
+
+
+async def async_trending_media(
+    client: JellyseerrClient, media_type: str, limit: int
+) -> list[dict[str, Any]]:
+    try:
+        results = await client.async_trending(media_type)
+    except JellyseerrError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="api_error",
+            translation_placeholders={"error": str(err)},
+        ) from err
+    # Seerr filters by type itself; older Jellyseerr releases may not.
+    if media_type != MEDIA_ALL:
+        results = [item for item in results if item["media_type"] == media_type]
+    return results[:limit]
+
+
+async def async_popular_media(
+    client: JellyseerrClient, media_type: str, limit: int
+) -> list[dict[str, Any]]:
+    """Popular titles. For "all", movies and shows alternate."""
+    types = MEDIA_TYPES if media_type == MEDIA_ALL else (media_type,)
+    try:
+        lists = await asyncio.gather(*(client.async_popular(kind) for kind in types))
+    except JellyseerrError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="api_error",
+            translation_placeholders={"error": str(err)},
+        ) from err
+    mixed = [item for item in chain.from_iterable(zip_longest(*lists)) if item]
+    return mixed[:limit]
+
+
+async def async_remove_media(
+    client: JellyseerrClient, media_type: str, tmdb_id: int
+) -> dict[str, Any]:
+    try:
+        removed = await client.async_remove(media_type, tmdb_id)
+    except JellyseerrError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="remove_failed",
+            translation_placeholders={"error": str(err)},
+        ) from err
+    if not removed:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="not_in_library",
+            translation_placeholders={"tmdb_id": str(tmdb_id)},
+        )
+    return {"tmdb_id": tmdb_id, "media_type": media_type}
 
 
 async def async_request_media(

@@ -61,3 +61,90 @@ async def test_error_reaches_card(hass: HomeAssistant, entry, aioclient_mock, ha
     await ws.send_json_auto_id({"type": f"{DOMAIN}/request", "tmdb_id": 1, "media_type": "movie"})
     msg = await ws.receive_json()
     assert not msg["success"]
+
+
+async def test_trending(hass: HomeAssistant, entry, aioclient_mock, hass_ws_client) -> None:
+    aioclient_mock.get(f"{API}/discover/trending", json=SEARCH)
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/trending"})
+    msg = await ws.receive_json()
+    assert msg["success"]
+    # The person in the fixture is dropped.
+    assert [r["tmdb_id"] for r in msg["result"]["results"]] == [438631, 90228]
+    assert msg["result"]["results"][1]["status"] == "available"
+    assert dict(aioclient_mock.mock_calls[-1][1].query) == {"mediaType": "all", "page": "1"}
+
+
+async def test_trending_filters_type(
+    hass: HomeAssistant, entry, aioclient_mock, hass_ws_client
+) -> None:
+    """Seerr filters by mediaType; a server that ignores it is filtered here."""
+    aioclient_mock.get(f"{API}/discover/trending", json=SEARCH)
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/trending", "media_type": "tv"})
+    msg = await ws.receive_json()
+    assert [r["tmdb_id"] for r in msg["result"]["results"]] == [90228]
+    assert dict(aioclient_mock.mock_calls[-1][1].query) == {"mediaType": "tv", "page": "1"}
+
+
+async def test_trending_rejects_unknown_type(hass: HomeAssistant, entry, hass_ws_client) -> None:
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/trending", "media_type": "person"})
+    msg = await ws.receive_json()
+    assert not msg["success"]
+
+
+MOVIES = {"results": [{"id": 1, "mediaType": "movie", "title": "A"}, {"id": 2, "mediaType": "movie", "title": "B"}]}
+SHOWS = {"results": [{"id": 3, "mediaType": "tv", "name": "C", "mediaInfo": {"status": 4}}]}
+
+
+async def test_popular_all_alternates(
+    hass: HomeAssistant, entry, aioclient_mock, hass_ws_client
+) -> None:
+    aioclient_mock.get(f"{API}/discover/movies", json=MOVIES)
+    aioclient_mock.get(f"{API}/discover/tv", json=SHOWS)
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/popular"})
+    msg = await ws.receive_json()
+    assert msg["success"]
+    assert [r["tmdb_id"] for r in msg["result"]["results"]] == [1, 3, 2]
+    assert msg["result"]["results"][1]["status"] == "partially_available"
+
+
+async def test_popular_one_type(hass: HomeAssistant, entry, aioclient_mock, hass_ws_client) -> None:
+    aioclient_mock.get(f"{API}/discover/tv", json=SHOWS)
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/popular", "media_type": "tv"})
+    msg = await ws.receive_json()
+    assert [r["tmdb_id"] for r in msg["result"]["results"]] == [3]
+    # Only the TV list is fetched (other calls are the sensors' /request/count).
+    urls = [call[1] for call in aioclient_mock.mock_calls]
+    tv = [url for url in urls if url.path == "/api/v1/discover/tv"]
+    assert tv and not any(url.path == "/api/v1/discover/movies" for url in urls)
+    # Low-vote shows (foreign daily news, soaps) are filtered out by Seerr.
+    assert dict(tv[-1].query) == {"page": "1", "voteCountGte": "500"}
+
+
+async def test_remove(hass: HomeAssistant, entry, aioclient_mock, hass_ws_client) -> None:
+    aioclient_mock.get(f"{API}/movie/438631", json={"id": 438631, "mediaInfo": {"id": 12, "status": 5}})
+    aioclient_mock.delete(f"{API}/media/12/file", status=204)
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/remove", "tmdb_id": 438631, "media_type": "movie"})
+    msg = await ws.receive_json()
+    assert msg["success"], msg
+    assert msg["result"] == {"tmdb_id": 438631, "media_type": "movie"}
+    method, url = aioclient_mock.mock_calls[-1][0], aioclient_mock.mock_calls[-1][1]
+    assert method == "DELETE" and url.path == "/api/v1/media/12/file"
+    assert dict(url.query) == {"is4k": "false"}
+
+
+async def test_remove_unknown_title(
+    hass: HomeAssistant, entry, aioclient_mock, hass_ws_client
+) -> None:
+    """Nothing in Jellyseerr's database: report it rather than calling delete."""
+    aioclient_mock.get(f"{API}/tv/1", json={"id": 1})
+    ws = await hass_ws_client(hass)
+    await ws.send_json_auto_id({"type": f"{DOMAIN}/remove", "tmdb_id": 1, "media_type": "tv"})
+    msg = await ws.receive_json()
+    assert not msg["success"]
+    assert not any(call[0] == "DELETE" for call in aioclient_mock.mock_calls)

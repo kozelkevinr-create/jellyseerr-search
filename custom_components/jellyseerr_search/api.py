@@ -9,7 +9,9 @@ import aiohttp
 from yarl import URL
 
 from .const import (
+    MEDIA_MOVIE,
     MEDIA_STATUS,
+    POPULAR_TV_MIN_VOTES,
     MEDIA_TYPES,
     REQUEST_TIMEOUT,
     STATUS_NOT_REQUESTED,
@@ -84,6 +86,33 @@ class JellyseerrClient:
             if item.get("mediaType") in MEDIA_TYPES
         ]
 
+    async def async_trending(self, media_type: str, page: int = 1) -> list[dict[str, Any]]:
+        """Trending titles (TMDB, past day), normalized. `media_type` is all, movie
+        or tv; Seerr filters by it. People and collections are dropped."""
+        data = await self._request(
+            "GET", "/discover/trending", params={"mediaType": media_type, "page": page}
+        )
+        return [
+            normalize_result(item)
+            for item in data.get("results", [])
+            if item.get("mediaType") in MEDIA_TYPES
+        ]
+
+    async def async_popular(self, media_type: str, page: int = 1) -> list[dict[str, Any]]:
+        """Popular movies or shows (TMDB discover, by popularity), normalized.
+        Jellyseerr has no combined list, so `media_type` is movie or tv. Shows
+        need POPULAR_TV_MIN_VOTES votes."""
+        if media_type == MEDIA_MOVIE:
+            path, params = "/discover/movies", {"page": page}
+        else:
+            path, params = "/discover/tv", {"page": page, "voteCountGte": POPULAR_TV_MIN_VOTES}
+        data = await self._request("GET", path, params=params)
+        return [
+            normalize_result(item)
+            for item in data.get("results", [])
+            if item.get("mediaType") in MEDIA_TYPES
+        ]
+
     async def async_get_tv_seasons(self, tmdb_id: int) -> list[dict[str, Any]]:
         """A show's seasons (specials excluded) with what the server has of each."""
         data = await self._request("GET", f"/tv/{tmdb_id}")
@@ -101,6 +130,18 @@ class JellyseerrClient:
             for season in data.get("seasons", [])
             if season.get("seasonNumber", 0) > 0
         ]
+
+    async def async_remove(self, media_type: str, tmdb_id: int) -> bool:
+        """Delete a movie or a whole show from Radarr/Sonarr, files included, the
+        way Jellyseerr's "Remove from Radarr/Sonarr" button does. Jellyseerr then
+        marks it deleted, so it can be requested again. False if Jellyseerr has
+        no record of it."""
+        data = await self._request("GET", f"/{media_type}/{tmdb_id}")
+        media_id = (data.get("mediaInfo") or {}).get("id")
+        if not media_id:
+            return False
+        await self._request("DELETE", f"/media/{media_id}/file", params={"is4k": "false"})
+        return True
 
     async def async_request(
         self,

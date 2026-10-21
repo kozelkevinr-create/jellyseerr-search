@@ -15,6 +15,9 @@ from .services import (
     parse_seasons,
     async_request_media,
     async_search_media,
+    async_popular_media,
+    async_remove_media,
+    async_trending_media,
     async_tv_seasons,
     resolve_client,
 )
@@ -24,7 +27,7 @@ SEARCH_LIMIT = 20
 
 @callback
 def async_register_websocket(hass: HomeAssistant) -> None:
-    for command in (ws_version, ws_search, ws_seasons, ws_request):
+    for command in (ws_version, ws_search, ws_trending, ws_popular, ws_seasons, ws_request, ws_remove):
         websocket_api.async_register_command(hass, command)
 
 
@@ -51,6 +54,39 @@ async def ws_search(
 ) -> None:
     client = resolve_client(hass, msg.get("config_entry_id"))
     results = await async_search_media(client, msg["query"], msg["media_type"], SEARCH_LIMIT)
+    connection.send_result(msg["id"], {"results": results})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/trending",
+        vol.Optional("media_type", default=MEDIA_ALL): vol.In((MEDIA_ALL, *MEDIA_TYPES)),
+        vol.Optional("config_entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_trending(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """What the card shows before anything is typed."""
+    client = resolve_client(hass, msg.get("config_entry_id"))
+    results = await async_trending_media(client, msg["media_type"], SEARCH_LIMIT)
+    connection.send_result(msg["id"], {"results": results})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/popular",
+        vol.Optional("media_type", default=MEDIA_ALL): vol.In((MEDIA_ALL, *MEDIA_TYPES)),
+        vol.Optional("config_entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_popular(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    client = resolve_client(hass, msg.get("config_entry_id"))
+    results = await async_popular_media(client, msg["media_type"], SEARCH_LIMIT)
     connection.send_result(msg["id"], {"results": results})
 
 
@@ -89,4 +125,22 @@ async def ws_request(
     result = await async_request_media(
         client, msg["media_type"], msg["tmdb_id"], seasons, msg["is_4k"]
     )
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/remove",
+        vol.Required("tmdb_id"): vol.All(int, vol.Range(min=1)),
+        vol.Required("media_type"): vol.In(MEDIA_TYPES),
+        vol.Optional("config_entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_remove(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Deletes files. The card only offers it when show_remove is set."""
+    client = resolve_client(hass, msg.get("config_entry_id"))
+    result = await async_remove_media(client, msg["media_type"], msg["tmdb_id"])
     connection.send_result(msg["id"], result)
